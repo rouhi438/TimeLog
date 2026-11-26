@@ -18,6 +18,7 @@ type Shift = {
   startTime?: string;
   endTime?: string;
   overnight?: boolean;
+  dayOff?: boolean;
   note?: string;
 };
 type Company = {
@@ -44,7 +45,7 @@ const monthNames = [
 function localDate(d = new Date()) { return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 function duration(start:string,end:string,overnight:boolean) { if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(start)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(end))return 0; const m=(v:string)=>Number(v.slice(0,2))*60+Number(v.slice(3)); return m(end)-m(start)+(overnight?1440:0); }
 function formatHours(h:number) { const m=Math.round(h*60); return `${Math.floor(m/60)} t${m%60 ? ` ${m%60} min` : ''}`; }
-function shiftTime(s:Shift) { return s.startTime && s.endTime ? `${s.startTime}–${s.endTime}${s.overnight?' (+1 dag)':''}` : 'Tidspunkter ikke registreret'; }
+function shiftTime(s:Shift) { if(s.dayOff)return "Fridag"; return s.startTime && s.endTime ? `${s.startTime}–${s.endTime}${s.overnight?' (+1 dag)':''}` : 'Tidspunkter ikke registreret'; }
 const uid = () => crypto.randomUUID();
 function csvEscape(v: any) {
   let text = String(v ?? "");
@@ -84,6 +85,7 @@ export default function Home() {
   const [endTime,setEndTime]=useState("");
   const [overnight,setOvernight]=useState(false);
   const [legacy,setLegacy]=useState(false);
+  const [dayOff,setDayOff]=useState(false);
   const [calendarDay,setCalendarDay]=useState(localDate());
   const [calendarEmployee,setCalendarEmployee]=useState("");
   const [reportPeriod,setReportPeriod]=useState<"month"|"year">("month");
@@ -355,11 +357,12 @@ export default function Home() {
       : [...employees, { id: uid(), active: true, ...fields }];
     if (await commit({ employees: next, shifts, company })) clearEmployeeForm();
   }
-  function clearEntry() { setEditId(""); setNote(""); setHours(""); setStartTime(""); setEndTime(""); setOvernight(false); setLegacy(false); }
+  function clearEntry() { setEditId(""); setNote(""); setHours(""); setStartTime(""); setEndTime(""); setOvernight(false); setLegacy(false); setDayOff(false); }
   async function saveShift() {
-    const total=legacy?Number(hours):minutes/60;
-    if(!empId || !date || !Number.isFinite(total) || total<=0 || total>24) { alert("Vælg medarbejder, dato og gyldig start- og sluttid."); return; }
-    const item:Shift={id:editId||uid(),employee_id:empId,date,hours:total,note,...(legacy?{}:{startTime,endTime,overnight})};
+    const total=dayOff?0:legacy?Number(hours):minutes/60;
+    if(!empId || !date || !Number.isFinite(total) || (!dayOff && total<=0) || total>24) { alert("Vælg medarbejder, dato og gyldig start- og sluttid."); return; }
+    if(shifts.some(s=>s.id!==editId && s.employee_id===empId && s.date===date && (dayOff||s.dayOff))) { alert("Der findes allerede en registrering eller fridag for denne medarbejder på datoen. Redigér den eksisterende registrering."); return; }
+    const item:Shift={id:editId||uid(),employee_id:empId,date,hours:total,note,...(dayOff?{dayOff:true}:legacy?{}:{startTime,endTime,overnight})};
     if(await commit({employees,shifts:editId?shifts.map(x=>x.id===editId?item:x):[...shifts,item],company})) { clearEntry(); setMonth(date.slice(0,7)); setCalendarDay(date); setTab("calendar"); }
   }
   async function removeShift(id: string) {
@@ -387,7 +390,7 @@ export default function Home() {
     setEmpId(s.employee_id);
     setDate(s.date);
     setHours(String(s.hours));
-    setStartTime(s.startTime||""); setEndTime(s.endTime||""); setOvernight(!!s.overnight); setLegacy(!s.startTime||!s.endTime);
+    setStartTime(s.startTime||""); setEndTime(s.endTime||""); setOvernight(!!s.overnight); setLegacy(!s.startTime||!s.endTime); setDayOff(!!s.dayOff);
     setNote(s.note || "");
     setTab("entry");
   }
@@ -401,13 +404,14 @@ export default function Home() {
       const parts = line.split(/[;\t ]+/);
       if (parts.length < 2) continue;
       const day = parts[0];
-      const timed=parts[1].includes(":");
+      const off=/^(fri|fridag)$/i.test(parts[1]);
+      const timed=!off && parts[1].includes(":");
       const start=parts[1], end=parts[2]||"";
       const overnightImport=timed && end.endsWith("+1");
       const cleanEnd=overnightImport?end.slice(0,-2):end;
-      const hrs=timed?duration(start,cleanEnd,overnightImport)/60:Number(parts[1].replace(",", "."));
+      const hrs=off?0:timed?duration(start,cleanEnd,overnightImport)/60:Number(parts[1].replace(",", "."));
       const target = parts.slice(timed?3:2).join(" ");
-      if (!day || !Number.isFinite(hrs) || hrs <= 0 || hrs > 24) continue;
+      if (!day || !Number.isFinite(hrs) || (!off && hrs <= 0) || hrs > 24) continue;
       let employee =
         employees.find((e) => e.name.toLowerCase() === target.toLowerCase()) ||
         employees.find(
@@ -419,13 +423,14 @@ export default function Home() {
         employee = employees[0];
       if (!employee) continue;
       const d = day.includes("-") ? day : `${month}-${day.padStart(2, "0")}`;
+      if([...shifts,...made].some(s=>s.employee_id===employee.id && s.date===d && (off||s.dayOff))) { alert(`Fridag konflikter med en registrering: ${d}. Ingen linjer importeret.`); return; }
       made.push({
         id: uid(),
         employee_id: employee.id,
         date: d,
         hours: hrs,
         note: "Bulk import",
-        ...(timed?{startTime:start,endTime:cleanEnd,overnight:overnightImport}:{}),
+        ...(off?{dayOff:true}:timed?{startTime:start,endTime:cleanEnd,overnight:overnightImport}:{}),
       });
     }
     if (!made.length) {
@@ -460,7 +465,7 @@ export default function Home() {
   const reportShifts=shifts.filter(s=>s.date.startsWith(reportKey));
   const reportTotals=employees.map(e=>({e,total:reportShifts.filter(s=>s.employee_id===e.id).reduce((a,s)=>a+s.hours,0)}));
   const reportHours=reportShifts.reduce((a,s)=>a+s.hours,0);
-  const reportDays=new Set(reportShifts.map(s=>s.date)).size;
+  const reportDays=new Set(reportShifts.filter(s=>!s.dayOff && s.hours>0).map(s=>s.date)).size;
   const palette=["#16834c","#187da5","#d58b23","#8161a9","#bd545b"];
   let angle=0;
   const chartSegments=reportTotals.filter(x=>x.total>0).map((x,i)=>{const a=angle;angle+=x.total/reportHours*360;return `${palette[i%palette.length]} ${a}deg ${angle}deg`;});
@@ -472,7 +477,7 @@ export default function Home() {
   const selectedDay=calendarDay.startsWith(month)?calendarDay:month+"-01";
   function exportCSV() {
     const rows = [
-      ["Dato", "Medarbejder", "Start", "Slut", "Næste dag", "Timer", "Varighed", "Note"],
+      ["Dato", "Medarbejder", "Start", "Slut", "Næste dag", "Timer", "Varighed", "Status", "Note"],
       ...reportShifts
         .slice()
         .sort((a, b) => a.date.localeCompare(b.date))
@@ -481,7 +486,7 @@ export default function Home() {
           employees.find((e) => e.id === s.employee_id)?.name || "",
           s.startTime||"", s.endTime||"", s.overnight?"Ja":"",
           s.hours.toLocaleString("da-DK",{maximumFractionDigits:6}), formatHours(s.hours),
-          s.note || "",
+          s.dayOff?"Fridag":"Arbejde", s.note || "",
         ]),
     ];
     const csv = rows.map((r) => r.map(csvEscape).join(";")).join("\n");
@@ -620,7 +625,7 @@ export default function Home() {
             </div>
             <div className="stat">
               <small>Registreringer</small>
-              <strong>{monthShifts.length}</strong>
+              <strong>{monthShifts.filter(s=>!s.dayOff).length}</strong>
             </div>
           </section>
           <nav className="nav">
@@ -687,7 +692,8 @@ export default function Home() {
           {tab === "calendar" && <section className="panel calendar-panel">
             <div className="sectionhead calendar-heading"><button className="secondary" aria-label="Forrige måned" onClick={()=>moveMonth(-1)}>‹</button><h2>{monthNames[cm-1]} {cy}</h2><button className="secondary" aria-label="Næste måned" onClick={()=>moveMonth(1)}>›</button></div>
             <label>Medarbejder<select value={calendarEmployee} onChange={e=>setCalendarEmployee(e.target.value)}><option value="">Alle medarbejdere</option>{employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select></label>
-            <div className="calendar-grid">{['Man','Tir','Ons','Tor','Fre','Lør','Søn'].map(d=><span className="weekday" key={d}>{d}</span>)}{Array.from({length:offset},(_,i)=><span key={'blank'+i}/>)}{Array.from({length:days},(_,i)=>{const d=month+'-'+String(i+1).padStart(2,'0');const records=calendarShifts.filter(s=>s.date===d);const total=records.reduce((a,s)=>a+s.hours,0);return <button key={d} className={'calendar-day '+(d===selectedDay?'selected ':'')+(records.length?'worked':'')} aria-pressed={d===selectedDay} onClick={()=>setCalendarDay(d)}><span>{i+1}</span>{records.length>0&&<small>{formatHours(total)}</small>}</button>})}</div>
+            <div className="calendar-grid">{['Man','Tir','Ons','Tor','Fre','Lør','Søn'].map(d=><span className="weekday" key={d}>{d}</span>)}{Array.from({length:offset},(_,i)=><span key={'blank'+i}/>)}{Array.from({length:days},(_,i)=>{const d=month+'-'+String(i+1).padStart(2,'0');const records=calendarShifts.filter(s=>s.date===d);const total=records.reduce((a,s)=>a+s.hours,0);const off=records.some(s=>s.dayOff);return <button key={d} className={'calendar-day '+(d===selectedDay?'selected ':'')+(total>0?'worked ': '')+(off?'day-off':'')} aria-pressed={d===selectedDay} onClick={()=>setCalendarDay(d)}><span>{i+1}</span>{total>0&&<small>{formatHours(total)}</small>}{off&&<small className="off-label">Fri</small>}</button>})}</div>
+            <style>{`.calendar-day.day-off:not(.worked){background:#e7e5fa;color:#45368a;border-color:#c9c2ef}.calendar-day.day-off.selected{outline:2px solid #6955b4;outline-offset:1px}.calendar-day .off-label{color:#45368a;background:#e7e5fa;padding:2px 4px;border-radius:4px}.calendar-day.day-off.worked{border-color:#6955b4}`}</style>
             <div className="totalbox"><span>Denne måned</span><strong>{formatHours(calendarShifts.reduce((a,s)=>a+s.hours,0))}</strong></div>
             <div className="sectionhead"><h3>{selectedDay}</h3><button onClick={()=>{clearEntry();setDate(selectedDay);if(calendarEmployee)setEmpId(calendarEmployee);setTab("entry")}}>+ Registrér</button></div>
             {calendarShifts.filter(s=>s.date===selectedDay).length===0&&<p className="empty">Ingen registreringer denne dag.</p>}
@@ -722,7 +728,8 @@ export default function Home() {
                   onChange={(e) => setDate(e.target.value)}
                 />
               </label>
-              {legacy ? <div className="legacy-note"><p>Historisk registrering uden start- og sluttid.</p><label>Timer<input type="number" min="0" max="24" step="any" value={hours} onChange={e=>setHours(e.target.value)}/></label><button className="secondary" onClick={()=>setLegacy(false)}>Angiv præcise tidspunkter</button></div> : <>
+              <label>Registreringstype<select value={dayOff?"off":"work"} onChange={e=>setDayOff(e.target.value==="off")}><option value="work">Arbejdstid</option><option value="off">Fridag</option></select></label>
+              {dayOff ? <div className="duration-box" style={{background:"#e7e5fa",color:"#45368a"}}><b>Fridag</b><span>0 timer</span></div> : legacy ? <div className="legacy-note"><p>Historisk registrering uden start- og sluttid.</p><label>Timer<input type="number" min="0" max="24" step="any" value={hours} onChange={e=>setHours(e.target.value)}/></label><button className="secondary" onClick={()=>setLegacy(false)}>Angiv præcise tidspunkter</button></div> : <>
                 <div className="time-fields"><label>Mødetid<input type="time" step="60" value={startTime} onChange={e=>setStartTime(e.target.value)}/></label><label>Sluttid<input type="time" step="60" value={endTime} onChange={e=>setEndTime(e.target.value)}/></label></div>
                 <label className="checkline"><input type="checkbox" checked={overnight} onChange={e=>setOvernight(e.target.checked)}/> Slut næste dag</label>
                 <div className="duration-box"><small>Samlet arbejdstid</small><strong>{minutes>0&&minutes<=1440?formatHours(minutes/60):"—"}</strong><span>{startTime&&endTime?`${startTime} – ${endTime}${overnight?' (+1 dag)':''}`:"Vælg start- og sluttid"}</span></div>
@@ -823,7 +830,7 @@ export default function Home() {
                 </button>
               </div>
               <style>{`@media screen { .report-details-collapsed { display: none; } }`}</style>
-              <div id="report-details" className={`report-table${showReportDetails ? "" : " report-details-collapsed"}`}><table><thead><tr><th>Dato</th><th>Medarbejder</th><th>Start / slut</th><th>Varighed</th><th>Note</th></tr></thead><tbody>{reportShifts.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(s=><tr key={s.id}><td>{s.date}</td><td>{employees.find(e=>e.id===s.employee_id)?.name}</td><td>{shiftTime(s)}</td><td>{formatHours(s.hours)}</td><td>{s.note}</td></tr>)}</tbody></table></div>
+              <div id="report-details" className={`report-table${showReportDetails ? "" : " report-details-collapsed"}`}><table><thead><tr><th>Dato</th><th>Medarbejder</th><th>Start / slut</th><th>Varighed</th><th>Status</th><th>Note</th></tr></thead><tbody>{reportShifts.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(s=><tr key={s.id}><td>{s.date}</td><td>{employees.find(e=>e.id===s.employee_id)?.name}</td><td>{shiftTime(s)}</td><td>{formatHours(s.hours)}</td><td>{s.dayOff?"Fridag":"Arbejde"}</td><td>{s.note}</td></tr>)}</tbody></table></div>
               <div className="actions export-actions">
                 <button onClick={exportCSV}>Eksportér CSV / Excel</button>
                 <button className="secondary" onClick={exportPDF}>
@@ -839,7 +846,7 @@ export default function Home() {
               <p className="hint">
                 Én registrering pr. linje: <code>2026-11-02 15:20 21:45 Anders</code>{" "}
                 eller <code>02 6 Anders</code> (datoen følger den valgte måned).
-                Historiske timer kan stadig importeres som decimaler. Brug 02:00+1 for slut næste dag.
+                Historiske timer kan stadig importeres som decimaler. Brug 02:00+1 for slut næste dag. Fridag: <code>27 Fri Anders</code>.
               </p>
               <textarea
                 rows={7}
