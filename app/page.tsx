@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { authClient } from "../lib/auth-client";
 
 type Employee = {
@@ -8,7 +8,9 @@ type Employee = {
   active: boolean;
   phone?: string;
   email?: string;
-  cpr?: string;
+  cpr?: string; // write only
+  hasCpr?: boolean;
+  cprLast4?: string;
 };
 type Shift = {
   id: string;
@@ -81,6 +83,15 @@ export default function Home() {
   const [employeePhone, setEmployeePhone] = useState("");
   const [employeeEmail, setEmployeeEmail] = useState("");
   const [employeeCpr, setEmployeeCpr] = useState("");
+  const [removeCpr,setRemoveCpr]=useState(false);
+  const [revealBusy,setRevealBusy]=useState(false);
+  const [revealed,setRevealed]=useState<Record<string,string>>({});
+  const [printCprs,setPrintCprs]=useState<Record<string,string>>({});
+  const [printing,setPrinting]=useState(false);
+  const requestGeneration=useRef(0);
+  function clearSensitive(){requestGeneration.current++;setRevealed({});setPrintCprs({});setPrintReady(false);setRevealBusy(false);setPrinting(false);}
+  useEffect(()=>{clearSensitive();},[tab,employeeEditId]);
+
   const [startTime,setStartTime]=useState("");
   const [endTime,setEndTime]=useState("");
   const [overnight,setOvernight]=useState(false);
@@ -90,6 +101,7 @@ export default function Home() {
   const [calendarEmployee,setCalendarEmployee]=useState("");
   const [reportPeriod,setReportPeriod]=useState<"month"|"year">("month");
   const [showReportDetails, setShowReportDetails] = useState(false);
+  useEffect(()=>{clearSensitive();},[month,reportPeriod]);
   const minutes=duration(startTime,endTime,overnight);
   const connected = true;
   const [revision, setRevision] = useState(-1),
@@ -113,7 +125,10 @@ export default function Home() {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
   }, []);
   useEffect(() => {
+    clearSensitive();
     setUser(null);
+    setEmployeeCpr("");
+    setRemoveCpr(false);
     setEmployees([]);
     setShifts([]);
     setRevision(-1);
@@ -127,6 +142,7 @@ export default function Home() {
     if (sessionData?.user) loadData();
     else if (!session.isPending) setReady(true);
   }, [sessionData?.user?.id, session.isPending]);
+  useEffect(()=>{if(tab!=="employees"){setEmployeeCpr("");setRemoveCpr(false);}},[tab]);
   async function loadData() {
     setLoading(true);
     try {
@@ -314,6 +330,7 @@ export default function Home() {
   }
 
   async function logout() {
+    clearSensitive();
     await authClient.signOut({});
     location.replace("/");
   }
@@ -323,13 +340,15 @@ export default function Home() {
     setEmployeePhone("");
     setEmployeeEmail("");
     setEmployeeCpr("");
+    setRemoveCpr(false);
   }
   function editEmployee(e: Employee) {
     setEmployeeEditId(e.id);
     setName(e.name);
     setEmployeePhone(e.phone || "");
     setEmployeeEmail(e.email || "");
-    setEmployeeCpr(e.cpr || "");
+    setEmployeeCpr("");
+    setRemoveCpr(false);
   }
   async function addEmployee() {
     const fullName = name.trim();
@@ -348,14 +367,20 @@ export default function Home() {
       alert("CPR-nummer skal bestå af 10 cifre (DDMMÅÅ-XXXX)."); return;
     }
     const cpr = digits ? `${digits.slice(0, 6)}-${digits.slice(6)}` : "";
-    if (cpr && employees.some(e => e.id !== employeeEditId && e.cpr?.replace(/-/g, "") === digits)) {
-      alert("CPR-nummeret er allerede registreret."); return;
-    }
-    const fields = { name: fullName, phone, email, cpr };
+    const fields = { name: fullName, phone, email, ...(removeCpr?{cpr:""}:cpr?{cpr}:{}) };
     const next = employeeEditId
       ? employees.map(e => e.id === employeeEditId ? { ...e, ...fields } : e)
       : [...employees, { id: uid(), active: true, ...fields }];
     if (await commit({ employees: next, shifts, company })) clearEmployeeForm();
+  }
+  async function fetchCpr(id:string){
+    const r=await fetch("/api/data",{method:"POST",cache:"no-store",headers:{"Content-Type":"application/json"},body:JSON.stringify({employeeId:id})});
+    const d=await r.json();if(!r.ok||typeof d.cpr!=="string"||!/^\d{6}-\d{4}$/.test(d.cpr))throw Error("CPR");return d.cpr as string;
+  }
+  async function revealCpr(id:string){
+    if(revealed[id]){setRevealed(old=>{const next={...old};delete next[id];return next;});return;}
+    if(revealBusy)return;const generation=requestGeneration.current;setRevealBusy(true);
+    try{const value=await fetchCpr(id);if(generation===requestGeneration.current)setRevealed(old=>({...old,[id]:value}));}catch{if(generation===requestGeneration.current)alert("CPR kunne ikke vises.");}finally{if(generation===requestGeneration.current)setRevealBusy(false);}
   }
   function clearEntry() { setEditId(""); setNote(""); setHours(""); setStartTime(""); setEndTime(""); setOvernight(false); setLegacy(false); setDayOff(false); }
   async function saveShift() {
@@ -498,18 +523,31 @@ export default function Home() {
     a.click();
     URL.revokeObjectURL(url);
   }
-  function exportPDF() {
-    document.body.classList.add("print-report");
-    try {
-      window.print();
-    } finally {
-      document.body.classList.remove("print-report");
-    }
+  async function exportPDF() {
+    if(printing)return;
+    const generation=requestGeneration.current;setPrinting(true);
+    try{
+      const values:Record<string,string>={};
+      for(const {e} of reportTotals){if(e.hasCpr)values[e.id]=await fetchCpr(e.id);if(generation!==requestGeneration.current)return;}
+      if(generation!==requestGeneration.current)return;
+      setPrintCprs(values);
+      // The effect prints after React commits the print-only fields.
+      setPrintReady(true);
+    }catch{if(generation===requestGeneration.current){setPrintCprs({});setPrinting(false);alert("CPR kunne ikke hentes. Rapporten blev ikke udskrevet.");}}
   }
+  const [printReady,setPrintReady]=useState(false);
+  useEffect(()=>{
+    if(!printReady||tab!=="reports")return;
+    const cleanup=()=>{document.body.classList.remove("print-report");setPrintCprs({});setPrintReady(false);setPrinting(false);};
+    window.addEventListener("afterprint",cleanup,{once:true});
+    document.body.classList.add("print-report");
+    try{window.print();}catch{cleanup();}
+    return ()=>{window.removeEventListener("afterprint",cleanup);document.body.classList.remove("print-report");};
+  },[printReady,tab]);
   function backup() {
-    if (employees.some(e => e.cpr) && !confirm("Backup indeholder CPR-numre og andre personoplysninger. Opbevar filen sikkert. Fortsæt?")) return;
+    if (!confirm("Backup indeholder personoplysninger, men ingen CPR-numre. Opbevar filen sikkert. Fortsæt?")) return;
     const blob = new Blob(
-      [JSON.stringify({ employees, shifts, company }, null, 2)],
+      [JSON.stringify({ employees:employees.map(({cpr,hasCpr,cprLast4,...e})=>e), shifts, company }, null, 2)],
       { type: "application/json" },
     );
     const u = URL.createObjectURL(blob);
@@ -526,8 +564,10 @@ export default function Home() {
     reader.onload = async () => {
       try {
         const d = JSON.parse(String(reader.result));
+        if(!Array.isArray(d.employees))throw Error("Invalid backup");
+        d.employees=d.employees.map(({cpr,hasCpr,cprLast4,...e}:Employee)=>e);
         if (
-          confirm("Erstat alle nuværende data med denne backup?") &&
+          confirm("Erstat data med denne backup? CPR bevares kun for medarbejdere med samme ID; øvrige CPR slettes. CPR importeres ikke.") &&
           (await commit(d))
         )
           alert("Backup indlæst");
@@ -658,7 +698,7 @@ export default function Home() {
                 <div className="personrow" key={e.id}>
                   <div>
                     <b>{e.name}</b>
-                    <small>{e.active ? "Aktiv" : "Inaktiv"}</small>
+                    <small>{e.active ? "Aktiv" : "Inaktiv"}</small>{e.hasCpr&&<button type="button" className="secondary" aria-label={revealed[e.id]?"Skjul CPR":"Vis CPR"} disabled={revealBusy} onClick={()=>revealCpr(e.id)}>{revealed[e.id]||`••••••-${e.cprLast4||"••••"}`}</button>}
                   </div>
                   <strong>
                     {formatHours(total)}
@@ -784,7 +824,8 @@ export default function Home() {
               <h2>{employeeEditId ? "Redigér medarbejder" : "Medarbejdere"}</h2>
               <form onSubmit={e => { e.preventDefault(); void addEmployee(); }}>
                 <label>Fulde navn<input required maxLength={500} placeholder="Medarbejderens navn" value={name} onChange={e => setName(e.target.value)} /></label>
-                <label>CPR-nummer (valgfrit)<input type="password" inputMode="numeric" autoComplete="off" maxLength={11} placeholder="DDMMÅÅ-XXXX" value={employeeCpr} onChange={e => setEmployeeCpr(e.target.value)} /></label>
+                <label>CPR-nummer (valgfrit)<input type="password" inputMode="numeric" autoComplete="off" maxLength={11} placeholder={employees.find(e=>e.id===employeeEditId)?.hasCpr?"Registreret – tomt felt bevarer CPR":"DDMMÅÅ-XXXX"} disabled={removeCpr} value={employeeCpr} onChange={e => setEmployeeCpr(e.target.value)} /></label>
+                {employees.find(e=>e.id===employeeEditId)?.hasCpr && <div className="actions"><button type="button" className="secondary" disabled={revealBusy||busy} onClick={()=>revealCpr(employeeEditId)}>{revealed[employeeEditId]||`••••••-${employees.find(e=>e.id===employeeEditId)?.cprLast4||"••••"}`}</button><button type="button" className="secondary" onClick={()=>{setRemoveCpr(!removeCpr);setEmployeeCpr("");}}>{removeCpr?"Fortryd fjernelse":"Fjern CPR ved gemning"}</button></div>}
                 <label>Telefonnummer (valgfrit)<input type="tel" maxLength={50} value={employeePhone} onChange={e => setEmployeePhone(e.target.value)} /></label>
                 <label>E-mail (valgfrit)<input type="email" maxLength={254} value={employeeEmail} onChange={e => setEmployeeEmail(e.target.value)} /></label>
                 <div className="actions">
@@ -796,7 +837,7 @@ export default function Home() {
                 <div className="listrow" key={e.id}>
                   <div>
                     <b>{e.name}</b>
-                    <small>{e.active ? "Aktiv" : "Inaktiv"}</small>
+                    <small>{e.active ? "Aktiv" : "Inaktiv"}</small>{e.hasCpr&&<button type="button" className="secondary" aria-label={revealed[e.id]?"Skjul CPR":"Vis CPR"} disabled={revealBusy} onClick={()=>revealCpr(e.id)}>{revealed[e.id]||`••••••-${e.cprLast4||"••••"}`}</button>}
                   </div>
                   <button type="button" className="secondary" disabled={busy} onClick={() => editEmployee(e)}>Redigér</button>
                   <button
@@ -816,7 +857,7 @@ export default function Home() {
               <div className="report-company"><b>{company.name}</b><small>{[company.cvr&&`CVR: ${company.cvr}`,company.address,company.phone,company.email].filter(Boolean).join(" · ")}</small></div>
               <div className="report-metrics"><div className="totalbox"><span>Samlet arbejdstid</span><strong>{formatHours(reportHours)}</strong></div><div className="totalbox"><span>Arbejdsdage (datoer)</span><strong>{reportDays}</strong></div></div>
               <h3>Medarbejderoversigt</h3>
-              <div className="report-overview"><div>{reportTotals.map(({e,total},i)=><div className="personrow" key={e.id}><b>{e.name}</b><strong>{formatHours(total)}</strong></div>)}</div>{reportHours>0&&<div className="donut" role="img" aria-label="Fordeling af arbejdstid" style={{background:`conic-gradient(${chartSegments.join(',')})`}}><span>{formatHours(reportHours)}</span></div>}</div>
+              <div className="report-overview"><div>{reportTotals.map(({e,total},i)=><div className="personrow" key={e.id}><b>{e.name}{printCprs[e.id]&&<small className="cpr-print-only">CPR: {printCprs[e.id]}</small>}</b><strong>{formatHours(total)}</strong></div>)}</div>{reportHours>0&&<div className="donut" role="img" aria-label="Fordeling af arbejdstid" style={{background:`conic-gradient(${chartSegments.join(',')})`}}><span>{formatHours(reportHours)}</span></div>}</div>
               <div className="sectionhead">
                 <h3>Registreringer ({reportShifts.length})</h3>
                 <button
@@ -829,11 +870,11 @@ export default function Home() {
                   {showReportDetails ? "Skjul detaljer ▲" : "Vis detaljer ▼"}
                 </button>
               </div>
-              <style>{`@media screen { .report-details-collapsed { display: none; } }`}</style>
+              <style>{`@media screen { .report-details-collapsed, .cpr-print-only { display: none; } } @media print { .cpr-print-only { display: block; } }`}</style>
               <div id="report-details" className={`report-table${showReportDetails ? "" : " report-details-collapsed"}`}><table><thead><tr><th>Dato</th><th>Medarbejder</th><th>Start / slut</th><th>Varighed</th><th>Status</th><th>Note</th></tr></thead><tbody>{reportShifts.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(s=><tr key={s.id}><td>{s.date}</td><td>{employees.find(e=>e.id===s.employee_id)?.name}</td><td>{shiftTime(s)}</td><td>{formatHours(s.hours)}</td><td>{s.dayOff?"Fridag":"Arbejde"}</td><td>{s.note}</td></tr>)}</tbody></table></div>
               <div className="actions export-actions">
                 <button onClick={exportCSV}>Eksportér CSV / Excel</button>
-                <button className="secondary" onClick={exportPDF}>
+                <button className="secondary" disabled={printing||busy} onClick={exportPDF}>
                   Gem som PDF / Print
                 </button>
               </div>
@@ -887,7 +928,7 @@ export default function Home() {
               <hr />
               <h3>Backup og gendannelse</h3>
               <button className="secondary" onClick={backup}>
-                Download backup (JSON)
+                Download backup uden CPR (JSON)
               </button>
               <label className="filelabel">
                 Gendan backup
