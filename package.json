@@ -1,0 +1,25 @@
+{
+  "name": "gastronomia-timeregistrering",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@neon/auth": "^0.8.2",
+    "@neondatabase/serverless": "^1.2.1",
+    "@supabase/supabase-js": "^2.49.1",
+    "next": "^16.4.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/react": "^19.3.3",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^5.8.2"
+  }
+}
